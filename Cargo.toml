@@ -1,0 +1,8 @@
+[package]
+name = "bookmark-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Converts browser bookmarks between Netscape HTML export and a plain JSON-lines format"
+
+[dependencies]

@@ -11,10 +11,9 @@
 pub struct Bookmark {
     pub title: String,
     pub url: String,
-    /// Folder path, if any. A single string rather than a `Vec` because
-    /// the Netscape format only nests folders one level deep in practice
-    /// and this keeps round-tripping simple; see the roadmap for nesting.
-    pub folder: Option<String>,
+    /// Folder path from root to the bookmark's containing folder, e.g.
+    /// `["Work", "Reading"]`. Empty when the bookmark isn't in a folder.
+    pub folder: Vec<String>,
     /// Seconds since the Unix epoch, taken from `ADD_DATE` when present.
     pub added: Option<i64>,
 }
@@ -54,53 +53,85 @@ pub fn write_netscape(bookmarks: &[Bookmark]) -> String {
     out.push_str("<H1>Bookmarks</H1>\n");
     out.push_str("<DL><p>\n");
 
-    // Assumes bookmarks are already grouped by folder; callers converting
-    // from a format with scattered folders should sort first.
-    let mut current_folder: Option<&str> = None;
-    for bookmark in bookmarks {
-        let folder = bookmark.folder.as_deref();
-        if folder != current_folder {
-            if current_folder.is_some() {
-                out.push_str("    </DL><p>\n");
-            }
-            if let Some(name) = folder {
-                out.push_str(&format!("    <DT><H3>{}</H3>\n    <DL><p>\n", escape_html(name)));
-            }
-            current_folder = folder;
-        }
-
-        let indent = if folder.is_some() { "        " } else { "    " };
-        let add_date_attr = match bookmark.added {
-            Some(ts) => format!(" ADD_DATE=\"{}\"", ts),
-            None => String::new(),
-        };
-        out.push_str(&format!(
-            "{indent}<DT><A HREF=\"{}\"{add_date_attr}>{}</A>\n",
-            escape_html(&bookmark.url),
-            escape_html(&bookmark.title),
-        ));
-    }
-    if current_folder.is_some() {
-        out.push_str("    </DL><p>\n");
-    }
+    let root = build_folder_tree(bookmarks);
+    write_folder_entries(&mut out, &root, 0);
 
     out.push_str("</DL><p>\n");
     out
+}
+
+/// One level of the folder tree, built from every bookmark's `folder`
+/// path. Bookmarks and subfolders are kept in a single ordered list so a
+/// folder is written wherever its first bookmark first appears, instead
+/// of requiring the input to already be grouped by folder.
+#[derive(Default)]
+struct FolderNode<'a> {
+    entries: Vec<NodeEntry<'a>>,
+}
+
+enum NodeEntry<'a> {
+    Bookmark(&'a Bookmark),
+    Folder(&'a str, FolderNode<'a>),
+}
+
+fn build_folder_tree(bookmarks: &[Bookmark]) -> FolderNode<'_> {
+    let mut root = FolderNode::default();
+    for bookmark in bookmarks {
+        let mut node = &mut root;
+        for name in &bookmark.folder {
+            let existing = node.entries.iter().position(|entry| {
+                matches!(entry, NodeEntry::Folder(n, _) if *n == name.as_str())
+            });
+            let index = existing.unwrap_or_else(|| {
+                node.entries
+                    .push(NodeEntry::Folder(name.as_str(), FolderNode::default()));
+                node.entries.len() - 1
+            });
+            node = match &mut node.entries[index] {
+                NodeEntry::Folder(_, child) => child,
+                NodeEntry::Bookmark(_) => unreachable!(),
+            };
+        }
+        node.entries.push(NodeEntry::Bookmark(bookmark));
+    }
+    root
+}
+
+fn write_folder_entries(out: &mut String, node: &FolderNode, depth: usize) {
+    let indent = "    ".repeat(depth + 1);
+    for entry in &node.entries {
+        match entry {
+            NodeEntry::Bookmark(bookmark) => {
+                let add_date_attr = match bookmark.added {
+                    Some(ts) => format!(" ADD_DATE=\"{}\"", ts),
+                    None => String::new(),
+                };
+                out.push_str(&format!(
+                    "{indent}<DT><A HREF=\"{}\"{add_date_attr}>{}</A>\n",
+                    escape_html(&bookmark.url),
+                    escape_html(&bookmark.title),
+                ));
+            }
+            NodeEntry::Folder(name, child) => {
+                out.push_str(&format!(
+                    "{indent}<DT><H3>{}</H3>\n{indent}<DL><p>\n",
+                    escape_html(*name)
+                ));
+                write_folder_entries(out, child, depth + 1);
+                out.push_str(&format!("{indent}</DL><p>\n"));
+            }
+        }
+    }
 }
 
 fn parse_anchor_line(line: &str, folder_stack: &[String]) -> Option<Bookmark> {
     let (tag, text) = extract_anchor(line)?;
     let url = extract_attr(&tag, "href")?;
     let added = extract_attr(&tag, "add_date").and_then(|s| s.parse::<i64>().ok());
-    let folder = if folder_stack.is_empty() {
-        None
-    } else {
-        Some(folder_stack.join("/"))
-    };
     Some(Bookmark {
         title: unescape_html(&text),
         url,
-        folder,
+        folder: folder_stack.to_vec(),
         added,
     })
 }
@@ -198,10 +229,7 @@ pub fn parse_bkj(input: &str) -> Vec<Bookmark> {
 }
 
 fn bookmark_to_json(bookmark: &Bookmark) -> String {
-    let folder_field = match &bookmark.folder {
-        Some(f) => json_string(f),
-        None => "null".to_string(),
-    };
+    let folder_field = json_string_array(&bookmark.folder);
     let added_field = match bookmark.added {
         Some(ts) => ts.to_string(),
         None => "null".to_string(),
@@ -218,14 +246,14 @@ fn parse_bookmark_json(line: &str) -> Option<Bookmark> {
 
     let mut title = None;
     let mut url = None;
-    let mut folder = None;
+    let mut folder = Vec::new();
     let mut added = None;
 
     for (key, value) in split_json_fields(inner) {
         match key.as_str() {
             "title" => title = parse_json_string(&value),
             "url" => url = parse_json_string(&value),
-            "folder" => folder = if value == "null" { None } else { parse_json_string(&value) },
+            "folder" => folder = parse_json_string_array(&value).unwrap_or_default(),
             "added" => added = if value == "null" { None } else { value.parse::<i64>().ok() },
             _ => {}
         }
@@ -241,14 +269,31 @@ fn parse_bookmark_json(line: &str) -> Option<Bookmark> {
 
 /// Splits the inside of a flat `{...}` object into `(key, raw_value)`
 /// pairs. Only handles the shapes `write_bkj` produces: string, number,
-/// or `null` values, no nested objects or arrays.
+/// `null`, or a flat array of strings — no nested objects.
 fn split_json_fields(inner: &str) -> Vec<(String, String)> {
+    split_unquoted(inner, ',')
+        .into_iter()
+        .filter_map(|part| {
+            let colon = find_unquoted_colon(&part)?;
+            let key = parse_json_string(part[..colon].trim())?;
+            let value = part[colon + 1..].trim().to_string();
+            Some((key, value))
+        })
+        .collect()
+}
+
+/// Splits `s` on top-level occurrences of `sep`, ignoring any that fall
+/// inside a quoted string or a `[...]` array. Used for both object
+/// fields (`,`-separated, where a field's value may itself be an array)
+/// and array elements (where the depth tracking is a no-op).
+fn split_unquoted(s: &str, sep: char) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
     let mut escaped = false;
+    let mut depth = 0u32;
 
-    for c in inner.chars() {
+    for c in s.chars() {
         if in_string {
             current.push(c);
             if escaped {
@@ -261,7 +306,13 @@ fn split_json_fields(inner: &str) -> Vec<(String, String)> {
         } else if c == '"' {
             in_string = true;
             current.push(c);
-        } else if c == ',' {
+        } else if c == '[' {
+            depth += 1;
+            current.push(c);
+        } else if c == ']' {
+            depth = depth.saturating_sub(1);
+            current.push(c);
+        } else if c == sep && depth == 0 {
             parts.push(std::mem::take(&mut current));
         } else {
             current.push(c);
@@ -272,14 +323,6 @@ fn split_json_fields(inner: &str) -> Vec<(String, String)> {
     }
 
     parts
-        .into_iter()
-        .filter_map(|part| {
-            let colon = find_unquoted_colon(&part)?;
-            let key = parse_json_string(part[..colon].trim())?;
-            let value = part[colon + 1..].trim().to_string();
-            Some((key, value))
-        })
-        .collect()
 }
 
 fn find_unquoted_colon(s: &str) -> Option<usize> {
@@ -301,6 +344,29 @@ fn find_unquoted_colon(s: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn json_string_array(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(item));
+    }
+    out.push(']');
+    out
+}
+
+fn parse_json_string_array(s: &str) -> Option<Vec<String>> {
+    let inner = s.trim().strip_prefix('[')?.strip_suffix(']')?;
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    split_unquoted(inner, ',')
+        .into_iter()
+        .map(|part| parse_json_string(part.trim()))
+        .collect()
 }
 
 fn json_string(s: &str) -> String {
@@ -363,7 +429,7 @@ mod tests {
         assert_eq!(bookmarks[0].title, "Example");
         assert_eq!(bookmarks[0].url, "https://example.com");
         assert_eq!(bookmarks[0].added, Some(1700000000));
-        assert_eq!(bookmarks[0].folder, None);
+        assert_eq!(bookmarks[0].folder, Vec::<String>::new());
     }
 
     #[test]
@@ -376,7 +442,26 @@ mod tests {
                      </DL><p>\n";
         let bookmarks = parse_netscape(html);
         assert_eq!(bookmarks.len(), 1);
-        assert_eq!(bookmarks[0].folder.as_deref(), Some("Work"));
+        assert_eq!(bookmarks[0].folder, vec!["Work".to_string()]);
+    }
+
+    #[test]
+    fn parses_bookmark_inside_nested_folders() {
+        let html = "<DL><p>\n\
+                     \x20   <DT><H3>Work</H3>\n\
+                     \x20   <DL><p>\n\
+                     \x20       <DT><H3>Reading</H3>\n\
+                     \x20       <DL><p>\n\
+                     \x20           <DT><A HREF=\"https://example.com\">Example</A>\n\
+                     \x20       </DL><p>\n\
+                     \x20   </DL><p>\n\
+                     </DL><p>\n";
+        let bookmarks = parse_netscape(html);
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(
+            bookmarks[0].folder,
+            vec!["Work".to_string(), "Reading".to_string()]
+        );
     }
 
     #[test]
@@ -384,9 +469,35 @@ mod tests {
         let original = vec![Bookmark {
             title: "Rust & Friends".to_string(),
             url: "https://rust-lang.org".to_string(),
-            folder: Some("Dev".to_string()),
+            folder: vec!["Dev".to_string()],
             added: Some(1600000000),
         }];
+        let html = write_netscape(&original);
+        assert_eq!(parse_netscape(&html), original);
+    }
+
+    #[test]
+    fn netscape_round_trip_preserves_nested_folders() {
+        let original = vec![
+            Bookmark {
+                title: "No folder".to_string(),
+                url: "https://a.example".to_string(),
+                folder: Vec::new(),
+                added: None,
+            },
+            Bookmark {
+                title: "Article".to_string(),
+                url: "https://b.example".to_string(),
+                folder: vec!["Work".to_string(), "Reading".to_string()],
+                added: Some(42),
+            },
+            Bookmark {
+                title: "Another article".to_string(),
+                url: "https://c.example".to_string(),
+                folder: vec!["Work".to_string(), "Reading".to_string()],
+                added: None,
+            },
+        ];
         let html = write_netscape(&original);
         assert_eq!(parse_netscape(&html), original);
     }
@@ -397,13 +508,13 @@ mod tests {
             Bookmark {
                 title: "No folder".to_string(),
                 url: "https://a.example".to_string(),
-                folder: None,
+                folder: Vec::new(),
                 added: None,
             },
             Bookmark {
                 title: "Quoted \"title\"".to_string(),
                 url: "https://b.example".to_string(),
-                folder: Some("Nested/Path".to_string()),
+                folder: vec!["Nested".to_string(), "Path".to_string()],
                 added: Some(42),
             },
         ];

@@ -21,8 +21,8 @@ Convert a browser export to `bkj` and print it to stdout:
 
 ```
 $ bookmark-bridge netscape bkj chrome-bookmarks.html
-{"title":"Rust Book","url":"https://doc.rust-lang.org/book/","folder":"Dev","added":1700000000}
-{"title":"Example","url":"https://example.com","folder":null,"added":null}
+{"title":"Rust Book","url":"https://doc.rust-lang.org/book/","folder":["Dev"],"added":1700000000}
+{"title":"Example","url":"https://example.com","folder":[],"added":null}
 ```
 
 Convert it back, writing to a file a browser can import:
@@ -36,12 +36,13 @@ $ bookmark-bridge bkj netscape bookmarks.bkj imported.html
 One JSON object per line, four fields, always present:
 
 ```json
-{"title": "Rust Book", "url": "https://doc.rust-lang.org/book/", "folder": "Dev", "added": 1700000000}
+{"title": "Rust Book", "url": "https://doc.rust-lang.org/book/", "folder": ["Dev"], "added": 1700000000}
 ```
 
-`folder` and `added` are `null` when absent. There's no top-level
-array wrapper, so files can be concatenated, `grep`ped, or streamed
-line by line.
+`folder` is a path from root to the bookmark's containing folder —
+`[]` at the top level, `["Parent", "Child"]` when nested. `added` is
+`null` when there's no date. There's no top-level array wrapper, so
+files can be concatenated, `grep`ped, or streamed line by line.
 
 ## Library
 
@@ -52,7 +53,7 @@ The conversion logic lives in `src/lib.rs` as plain functions over
 pub struct Bookmark {
     pub title: String,
     pub url: String,
-    pub folder: Option<String>,
+    pub folder: Vec<String>,
     pub added: Option<i64>,
 }
 
@@ -70,13 +71,11 @@ pulling in a general-purpose parser.
 
 ## Known limitations
 
-- Folders are a single string, not a path — a bookmark inside nested
-  folders gets `"Parent/Child"` as its folder name rather than a real
-  hierarchy. Round-trips fine as long as folder names don't contain
-  `/`.
-- `write_netscape` assumes bookmarks are already grouped by folder
-  (all of one folder's bookmarks adjacent in the slice). Sort first if
-  converting from a source that interleaves them.
+- `write_netscape` groups bookmarks by their `folder` path itself, so
+  input order doesn't need to match the output grouping — but a
+  folder always appears at the position of the first bookmark that
+  used it, and everything with that same path ends up nested inside
+  it, even if the input scattered them elsewhere in the slice.
 
 ## Building
 

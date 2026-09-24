@@ -14,7 +14,7 @@ into other tools.
 ## Usage
 
 ```
-bookmark-bridge <from:netscape|bkj> <to:netscape|bkj> <input-file> [output-file]
+bookmark-bridge <from:netscape|bkj> <to:netscape|bkj> <input-file> [output-file] [--merge <second-input-file>]
 ```
 
 Convert a browser export to `bkj` and print it to stdout:
@@ -29,6 +29,14 @@ Convert it back, writing to a file a browser can import:
 
 ```
 $ bookmark-bridge bkj netscape bookmarks.bkj imported.html
+```
+
+Merge two exports of the same format (say, bookmarks from two
+machines) and dedupe by URL before converting, keeping the first
+file's title, folder, and date whenever a URL appears in both:
+
+```
+$ bookmark-bridge netscape bkj laptop.html merged.bkj --merge desktop.html
 ```
 
 ## The bkj format
@@ -61,6 +69,7 @@ pub fn parse_netscape(input: &str) -> Vec<Bookmark>;
 pub fn write_netscape(bookmarks: &[Bookmark]) -> String;
 pub fn parse_bkj(input: &str) -> Vec<Bookmark>;
 pub fn write_bkj(bookmarks: &[Bookmark]) -> String;
+pub fn merge_bookmarks(primary: &[Bookmark], secondary: &[Bookmark]) -> Vec<Bookmark>;
 ```
 
 `src/main.rs` is a thin CLI wrapper around these four functions. No

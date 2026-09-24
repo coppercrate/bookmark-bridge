@@ -18,6 +18,24 @@ pub struct Bookmark {
     pub added: Option<i64>,
 }
 
+/// Combines two bookmark lists into one, dropping duplicates by URL.
+/// `primary` entries always win: if a URL appears in both lists, the
+/// copy from `primary` is kept (its title, folder, and date), and the
+/// `secondary` copy is discarded. Relative order within each input is
+/// preserved, with all of `primary` first followed by the unmatched
+/// remainder of `secondary`.
+pub fn merge_bookmarks(primary: &[Bookmark], secondary: &[Bookmark]) -> Vec<Bookmark> {
+    let mut seen: std::collections::HashSet<&str> =
+        primary.iter().map(|b| b.url.as_str()).collect();
+    let mut merged = primary.to_vec();
+    for bookmark in secondary {
+        if seen.insert(bookmark.url.as_str()) {
+            merged.push(bookmark.clone());
+        }
+    }
+    merged
+}
+
 // ---------------------------------------------------------------------
 // Netscape Bookmark HTML
 // ---------------------------------------------------------------------
@@ -520,6 +538,55 @@ mod tests {
         ];
         let json = write_bkj(&original);
         assert_eq!(parse_bkj(&json), original);
+    }
+
+    #[test]
+    fn merge_drops_duplicate_urls_preferring_primary() {
+        let primary = vec![Bookmark {
+            title: "Primary title".to_string(),
+            url: "https://shared.example".to_string(),
+            folder: vec!["A".to_string()],
+            added: Some(1),
+        }];
+        let secondary = vec![
+            Bookmark {
+                title: "Secondary title".to_string(),
+                url: "https://shared.example".to_string(),
+                folder: vec!["B".to_string()],
+                added: Some(2),
+            },
+            Bookmark {
+                title: "Only in secondary".to_string(),
+                url: "https://only-secondary.example".to_string(),
+                folder: Vec::new(),
+                added: None,
+            },
+        ];
+
+        let merged = merge_bookmarks(&primary, &secondary);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0], primary[0]);
+        assert_eq!(merged[1], secondary[1]);
+    }
+
+    #[test]
+    fn merge_with_no_overlap_concatenates_both() {
+        let primary = vec![Bookmark {
+            title: "One".to_string(),
+            url: "https://a.example".to_string(),
+            folder: Vec::new(),
+            added: None,
+        }];
+        let secondary = vec![Bookmark {
+            title: "Two".to_string(),
+            url: "https://b.example".to_string(),
+            folder: Vec::new(),
+            added: None,
+        }];
+
+        let merged = merge_bookmarks(&primary, &secondary);
+        assert_eq!(merged, vec![primary[0].clone(), secondary[0].clone()]);
     }
 
     #[test]
